@@ -4,7 +4,7 @@
 All Recognition Plugins should inherit from this class.
 See the override methods for which methods are required.
 
-The plugin will receive a :class:`~plugins.extract.pipeline.ExtractMedia` object.
+The plugin will receive a :class:`~plugins.extract.extract_media.ExtractMedia` object.
 
 For each source frame, the plugin must pass a dict to finalize containing:
 
@@ -15,28 +15,23 @@ To get a :class:`~lib.align.DetectedFace` object use the function:
 
 >>> face = self.to_detected_face(<face left>, <face top>, <face right>, <face bottom>)
 """
+from __future__ import annotations
 import logging
-import sys
+import typing as T
 
 from dataclasses import dataclass, field
-from typing import Generator, List, Optional, Tuple, TYPE_CHECKING
 
 import numpy as np
 from tensorflow.python.framework import errors_impl as tf_errors  # pylint:disable=no-name-in-module  # noqa
 
-from lib.align import AlignedFace, DetectedFace
+from lib.align import AlignedFace, DetectedFace, LandmarkType
 from lib.image import read_image_meta
-from lib.utils import FaceswapError, get_backend
-from plugins.extract._base import BatchType, Extractor, ExtractorBatch
-from plugins.extract.pipeline import ExtractMedia
+from lib.utils import FaceswapError
+from plugins.extract import ExtractMedia
+from plugins.extract._base import BatchType, ExtractorBatch, Extractor
 
-if sys.version_info < (3, 8):
-    from typing_extensions import get_args, Literal
-else:
-    from typing import get_args, Literal
-
-
-if TYPE_CHECKING:
+if T.TYPE_CHECKING:
+    from collections.abc import Generator
     from queue import Queue
     from lib.align.aligned_face import CenteringType
 
@@ -49,8 +44,8 @@ class RecogBatch(ExtractorBatch):
 
     Inherits from :class:`~plugins.extract._base.ExtractorBatch`
     """
-    detected_faces: List["DetectedFace"] = field(default_factory=list)
-    feed_faces: List[AlignedFace] = field(default_factory=list)
+    detected_faces: list[DetectedFace] = field(default_factory=list)
+    feed_faces: list[AlignedFace] = field(default_factory=list)
 
 
 class Identity(Extractor):  # pylint:disable=abstract-method
@@ -80,10 +75,12 @@ class Identity(Extractor):  # pylint:disable=abstract-method
     plugins.extract.mask._base : Masker parent class for extraction plugins.
     """
 
+    _logged_lm_count_once = False
+
     def __init__(self,
-                 git_model_id: Optional[int] = None,
-                 model_filename: Optional[str] = None,
-                 configfile: Optional[str] = None,
+                 git_model_id: int | None = None,
+                 model_filename: str | None = None,
+                 configfile: str | None = None,
                  instance: int = 0,
                  **kwargs):
         logger.debug("Initializing %s", self.__class__.__name__)
@@ -93,7 +90,7 @@ class Identity(Extractor):  # pylint:disable=abstract-method
                          instance=instance,
                          **kwargs)
         self.input_size = 256  # Override for model specific input_size
-        self.centering: "CenteringType" = "legacy"  # Override for model specific centering
+        self.centering: CenteringType = "legacy"  # Override for model specific centering
         self.coverage_ratio = 1.0  # Override for model specific coverage_ratio
 
         self._plugin_type = "recognition"
@@ -106,7 +103,7 @@ class Identity(Extractor):  # pylint:disable=abstract-method
 
         Parameters
         ----------
-        item: :class:`~plugins.extract.pipeline.ExtractMedia`
+        item: :class:`~plugins.extract.extract_media.ExtractMedia`
             The extract media to populate the detected face for
          """
         detected_face = DetectedFace()
@@ -118,14 +115,28 @@ class Identity(Extractor):  # pylint:disable=abstract-method
         logger.debug("Obtained detected face: (filename: %s, detected_face: %s)",
                      item.filename, item.detected_faces)
 
-    def get_batch(self, queue: "Queue") -> Tuple[bool, RecogBatch]:
+    def _maybe_log_warning(self, face: AlignedFace) -> None:
+        """ Log a warning, once, if we do not have full facial landmarks
+
+        Parameters
+        ----------
+        face: :class:`~lib.align.aligned_face.AlignedFace`
+            The aligned face object to test the landmark type for
+        """
+        if face.landmark_type != LandmarkType.LM_2D_4 or self._logged_lm_count_once:
+            return
+        logger.warning("Extracted faces do not contain facial landmark data. '%s' "
+                       "identity data is likely to be sub-standard.", self.name)
+        self._logged_lm_count_once = True
+
+    def get_batch(self, queue: Queue) -> tuple[bool, RecogBatch]:
         """ Get items for inputting into the recognition from the queue in batches
 
         Items are returned from the ``queue`` in batches of
         :attr:`~plugins.extract._base.Extractor.batchsize`
 
-        Items are received as :class:`~plugins.extract.pipeline.ExtractMedia` objects and converted
-        to :class:`RecogBatch` for internal processing.
+        Items are received as :class:`~plugins.extract.extract_media.ExtractMedia` objects and
+        converted to :class:`RecogBatch` for internal processing.
 
         To ensure consistent batch sizes for masker the items are split into separate items for
         each :class:`~lib.align.DetectedFace` object.
@@ -178,6 +189,8 @@ class Identity(Extractor):  # pylint:disable=abstract-method
                                         dtype="float32",
                                         is_aligned=item.is_aligned)
 
+                self._maybe_log_warning(feed_face)
+
                 batch.detected_faces.append(face)
                 batch.feed_faces.append(feed_face)
                 batch.filename.append(item.filename)
@@ -224,23 +237,6 @@ class Identity(Extractor):  # pylint:disable=abstract-method
                    "CLI: Edit the file faceswap/config/extract.ini)."
                    "\n3) Enable 'Single Process' mode.")
             raise FaceswapError(msg) from err
-        except Exception as err:
-            if get_backend() == "amd":
-                # pylint:disable=import-outside-toplevel
-                from lib.plaidml_utils import is_plaidml_error
-                if (is_plaidml_error(err) and (
-                        "CL_MEM_OBJECT_ALLOCATION_FAILURE" in str(err).upper() or
-                        "enough memory for the current schedule" in str(err).lower())):
-                    msg = ("You do not have enough GPU memory available to run detection at "
-                           "the selected batch size. You can try a number of things:"
-                           "\n1) Close any other application that is using your GPU (web "
-                           "browsers are particularly bad for this)."
-                           "\n2) Lower the batchsize (the amount of images fed into the "
-                           "model) by editing the plugin settings (GUI: Settings > Configure "
-                           "extract settings, CLI: Edit the file "
-                           "faceswap/config/extract.ini).")
-                    raise FaceswapError(msg) from err
-            raise
 
     def finalize(self, batch: BatchType) -> Generator[ExtractMedia, None, None]:
         """ Finalize the output from Masker
@@ -256,7 +252,7 @@ class Identity(Extractor):  # pylint:disable=abstract-method
 
         Yields
         ------
-        :class:`~plugins.extract.pipeline.ExtractMedia`
+        :class:`~plugins.extract.extract_media.ExtractMedia`
             The :attr:`DetectedFaces` list will be populated for this class with the bounding
             boxes, landmarks and masks for the detected faces found in the frame.
         """
@@ -317,8 +313,8 @@ class IdentityFilter():
     def __init__(self, save_output: bool) -> None:
         logger.debug("Initializing %s: (save_output: %s)", self.__class__.__name__, save_output)
         self._save_output = save_output
-        self._filter: Optional[np.ndarray] = None
-        self._nfilter: Optional[np.ndarray] = None
+        self._filter: np.ndarray | None = None
+        self._nfilter: np.ndarray | None = None
         self._threshold = 0.0
         self._filter_enabled: bool = False
         self._nfilter_enabled: bool = False
@@ -373,7 +369,7 @@ class IdentityFilter():
         return retval
 
     def _get_matches(self,
-                     filter_type: Literal["filter", "nfilter"],
+                     filter_type: T.Literal["filter", "nfilter"],
                      identities: np.ndarray) -> np.ndarray:
         """ Obtain the average and minimum distances for each face against the source identities
         to test against
@@ -402,9 +398,9 @@ class IdentityFilter():
         return retval
 
     def _filter_faces(self,
-                      faces: List[DetectedFace],
-                      sub_folders: List[Optional[str]],
-                      should_filter: List[bool]) -> List[DetectedFace]:
+                      faces: list[DetectedFace],
+                      sub_folders: list[str | None],
+                      should_filter: list[bool]) -> list[DetectedFace]:
         """ Filter the detected faces, either removing filtered faces from the list of detected
         faces or setting the output subfolder to `"_identity_filt"` for any filtered faces if
         saving output is enabled.
@@ -426,7 +422,7 @@ class IdentityFilter():
             The filtered list of detected face objects, if saving filtered faces has not been
             selected or the full list of detected faces
         """
-        retval: List[DetectedFace] = []
+        retval: list[DetectedFace] = []
         self._counts += sum(should_filter)
         for idx, face in enumerate(faces):
             fldr = sub_folders[idx]
@@ -445,8 +441,8 @@ class IdentityFilter():
         return retval
 
     def __call__(self,
-                 faces: List[DetectedFace],
-                 sub_folders: List[Optional[str]]) -> List[DetectedFace]:
+                 faces: list[DetectedFace],
+                 sub_folders: list[str | None]) -> list[DetectedFace]:
         """ Call the identity filter function
 
         Parameters
@@ -475,14 +471,14 @@ class IdentityFilter():
             logger.trace("All faces already filtered: %s", sub_folders)  # type: ignore
             return faces
 
-        should_filter: List[np.ndarray] = []
-        for f_type in get_args(Literal["filter", "nfilter"]):
+        should_filter: list[np.ndarray] = []
+        for f_type in T.get_args(T.Literal["filter", "nfilter"]):
             if not getattr(self, f"_{f_type}_enabled"):
                 continue
             should_filter.append(self._get_matches(f_type, identities))
 
         # If any of the filter or nfilter evaluate to 'should filter' then filter out face
-        final_filter: List[bool] = np.array(should_filter).max(axis=0).tolist()
+        final_filter: list[bool] = np.array(should_filter).max(axis=0).tolist()
         logger.trace("should_filter: %s, final_filter: %s",  # type: ignore
                      should_filter, final_filter)
         return self._filter_faces(faces, sub_folders, final_filter)

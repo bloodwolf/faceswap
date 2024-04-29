@@ -4,12 +4,12 @@ import datetime
 import gettext
 import logging
 import os
-import sys
 import tkinter as tk
+import typing as T
 
 from tkinter import ttk
-from typing import Dict, Optional, Tuple
 
+from lib.logger import parse_class_init
 from lib.training.preview_tk import PreviewTk
 
 from .display_graph import TrainingGraph
@@ -19,23 +19,17 @@ from .analysis import Calculations, Session
 from .control_helper import set_slider_rounding
 from .utils import FileHandler, get_config, get_images, preview_trigger
 
-if sys.version_info < (3, 8):
-    from typing_extensions import get_args, Literal
-else:
-    from typing import get_args, Literal
-
-logger = logging.getLogger(__name__)  # pylint: disable=invalid-name
+logger = logging.getLogger(__name__)
 
 # LOCALES
 _LANG = gettext.translation("gui.tooltips", localedir="locales", fallback=True)
 _ = _LANG.gettext
 
 
-class PreviewExtract(DisplayOptionalPage):  # pylint: disable=too-many-ancestors
+class PreviewExtract(DisplayOptionalPage):  # pylint:disable=too-many-ancestors
     """ Tab to display output preview images for extract and convert """
     def __init__(self, *args, **kwargs) -> None:
-        logger.debug("Initializing %s (args: %s, kwargs: %s)",
-                     self.__class__.__name__, args, kwargs)
+        logger.debug(parse_class_init(locals()))
         self._preview = get_images().preview_extract
         super().__init__(*args, **kwargs)
         logger.debug("Initialized %s", self.__class__.__name__)
@@ -86,13 +80,12 @@ class PreviewExtract(DisplayOptionalPage):  # pylint: disable=too-many-ancestors
         print(f"Saved preview to {filename}")
 
 
-class PreviewTrain(DisplayOptionalPage):  # pylint: disable=too-many-ancestors
+class PreviewTrain(DisplayOptionalPage):  # pylint:disable=too-many-ancestors
     """ Training preview image(s) """
     def __init__(self, *args, **kwargs) -> None:
-        logger.debug("Initializing %s (args: %s, kwargs: %s)",
-                     self.__class__.__name__, args, kwargs)
+        logger.debug(parse_class_init(locals()))
         self._preview = get_images().preview_train
-        self._display: Optional[PreviewTk] = None
+        self._display: PreviewTk | None = None
         super().__init__(*args, **kwargs)
         logger.debug("Initialized %s", self.__class__.__name__)
 
@@ -170,17 +163,19 @@ class PreviewTrain(DisplayOptionalPage):  # pylint: disable=too-many-ancestors
         self._display.save(location)
 
 
-class GraphDisplay(DisplayOptionalPage):  # pylint: disable=too-many-ancestors
+class GraphDisplay(DisplayOptionalPage):  # pylint:disable=too-many-ancestors
     """ The Graph Tab of the Display section """
     def __init__(self,
                  parent: ttk.Notebook,
                  tab_name: str,
                  helptext: str,
                  wait_time: int,
-                 command: Optional[str] = None) -> None:
-        self._trace_vars: Dict[Literal["smoothgraph", "display_iterations"],
-                               Tuple[tk.BooleanVar, str]] = {}
+                 command: str | None = None) -> None:
+        logger.debug(parse_class_init(locals()))
+        self._trace_vars: dict[T.Literal["smoothgraph", "display_iterations"],
+                               tuple[tk.BooleanVar, str]] = {}
         super().__init__(parent, tab_name, helptext, wait_time, command)
+        logger.debug("Initialized %s", self.__class__.__name__)
 
     def set_vars(self) -> None:
         """ Add graphing specific variables to the default variables.
@@ -218,7 +213,8 @@ class GraphDisplay(DisplayOptionalPage):  # pylint: disable=too-many-ancestors
 
         Pull latest data and run the tab's update code when the tab is selected.
         """
-        logger.debug("Callback received for '%s' tab", self.tabname)
+        logger.debug("Callback received for '%s' tab (display_item: %s)",
+                     self.tabname, self.display_item)
         if self.display_item is not None:
             get_config().tk_vars.refresh_graph.set(True)
         self._update_page()
@@ -354,7 +350,6 @@ class GraphDisplay(DisplayOptionalPage):  # pylint: disable=too-many-ancestors
             self.after(1000, self.display_item_process)
             return
 
-        logger.debug("Adding graph")
         existing = list(self.subnotebook_get_titles_ids().keys())
 
         loss_keys = self.display_item.get_loss_keys(Session.session_ids[-1])
@@ -371,6 +366,7 @@ class GraphDisplay(DisplayOptionalPage):  # pylint: disable=too-many-ancestors
             tabname = loss_key.replace("_", " ").title()
             if tabname in existing:
                 continue
+            logger.debug("Adding graph '%s'", tabname)
 
             display_keys = [key for key in loss_keys if key.startswith(loss_key)]
             data = Calculations(session_id=Session.session_ids[-1],
@@ -446,7 +442,7 @@ class GraphDisplay(DisplayOptionalPage):  # pylint: disable=too-many-ancestors
 
     def _add_trace_variables(self) -> None:
         """ Add tracing for when the option sliders are updated, for updating the graph. """
-        for name, action in zip(get_args(Literal["smoothgraph", "display_iterations"]),
+        for name, action in zip(T.get_args(T.Literal["smoothgraph", "display_iterations"]),
                                 (self._smooth_amount_callback, self._iteration_limit_callback)):
             var = self.vars[name]
             if name not in self._trace_vars:
