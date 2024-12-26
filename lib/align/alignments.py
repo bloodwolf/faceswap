@@ -407,8 +407,8 @@ class Alignments():
             ``True`` if all faces in the current alignments possess the given ``mask_type``
             otherwise ``False``
         """
-        retval = any((face.get("mask", None) is not None and
-                      face["mask"].get(mask_type, None) is not None)
+        retval = all((face.get("mask") is not None and
+                      face["mask"].get(mask_type) is not None)
                      for val in self._data.values()
                      for face in val["faces"])
         logger.debug(retval)
@@ -796,7 +796,15 @@ class _IO():
         now = datetime.now().strftime("%Y%m%d_%H%M%S")
         src = self._file
         split = os.path.splitext(src)
-        dst = split[0] + "_" + now + split[1]
+        dst = f"{split[0]}_{now}{split[1]}"
+        idx = 1
+        while True:
+            if not os.path.exists(dst):
+                break
+            logger.debug("Backup file %s exists. Incrementing", dst)
+            dst = f"{split[0]}_{now}({idx}){split[1]}"
+            idx += 1
+
         logger.info("Backing up original alignments to '%s'", dst)
         os.rename(src, dst)
         logger.debug("Backed up alignments")
